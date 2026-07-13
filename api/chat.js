@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // تفعيل الـ CORS لتسمح لتطبيق الـ APK والموقع بالاتصال دون قيود
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -13,14 +12,19 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { message } = req.body;
+    // كود ذكي: يقرأ الرسالة سواء كانت باسم message أو prompt أو text لضمان التوافق التام
+    const userText = req.body.message || req.body.prompt || req.body.text;
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return res.status(500).json({ error: 'مفتاح الـ API الخاص بـ Gemini غير معرف في Vercel' });
     }
 
-    // الاتصال المباشر بنموذج Gemini 1.5 Flash السريع جداً مجاناً
+    if (!userText) {
+      return res.status(400).json({ error: 'لم يصل أي نص من الواجهة، تأكد من مسميات الإرسال.' });
+    }
+
+    // الاتصال المباشر بنموذج Gemini 1.5 Flash
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: {
@@ -28,7 +32,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         contents: [{
-          parts: [{ text: message }]
+          parts: [{ text: userText }]
         }]
       })
     });
@@ -41,7 +45,7 @@ export default async function handler(req, res) {
 
     const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || 'لم أتمكن من توليد رد، حاول مجدداً.';
     
-    // إرسال الرد بصيغ مختلفة لضمان توافقها التام مع ملف الـ index.html لديك
+    // إرسال الرد بجميع المسميات الممكنة ليفهمها تطبيق الـ APK فوراً
     return res.status(200).json({ 
       reply: aiResponse,
       response: aiResponse,
