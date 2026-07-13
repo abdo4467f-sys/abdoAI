@@ -20,37 +20,42 @@ export default async function handler(req, res) {
 
     let dataBody = req.body;
     
-    // 1. التعامل الذكي مع النصوص الخام إذا لم يتم إرسالها كـ JSON جاهز
     if (typeof dataBody === 'string') {
       try {
         dataBody = JSON.parse(dataBody);
       } catch (e) {
-        // إذا فشل التحويل، فهذا يعني أن التطبيق يرسل الرسالة كنص عادي مباشر في الـ body
-        dataBody = { rawText: dataBody };
+        // إذا كان النص قادماً كـ string خام
       }
     }
 
-    // 2. استخراج النص بجميع المسميات المحتملة، أو سحب أول نص متوفر في الطلب
     let userText = '';
+    
     if (dataBody && typeof dataBody === 'object') {
-      userText = dataBody.message || 
-                 dataBody.prompt || 
-                 dataBody.text || 
-                 dataBody.rawText || 
-                 dataBody.input ||
-                 Object.values(dataBody).find(v => typeof v === 'string') || '';
+      // الحل العبقري: استخراج آخر رسالة للمستخدم من مصفوفة المحادثة (OpenAI Format)
+      if (Array.isArray(dataBody.messages) && dataBody.messages.length > 0) {
+        const lastUser = [...dataBody.messages].reverse().find(m => m.role === "user");
+        userText = lastUser?.content?.trim() || "";
+      }
+      
+      // حل احتياطي في حال تم إرسال الطلب بصيغة حقول فردية مستقبلاً
+      if (!userText) {
+        userText = dataBody.message || 
+                   dataBody.prompt || 
+                   dataBody.text || 
+                   dataBody.input ||
+                   Object.values(dataBody).find(v => typeof v === 'string') || '';
+      }
     }
 
     userText = userText.trim();
 
-    // إذا استمر عدم وجود نص بعد كل هذه المحاولات
     if (!userText) {
       return res.status(400).json({ 
-        error: 'السيرفر استقبل الطلب بنجاح، لكن لم يعثر على أي نص للرسالة داخل البيانات المرسلة من التطبيق.' 
+        error: 'لم يعثر السيرفر على نص الرسالة داخل مصفوفة messages القادمة من التطبيق.' 
       });
     }
 
-    // 3. تمرير النص النظيف الآن بنجاح إلى جوجل
+    // تمرير النص النظيف إلى خوادم جوجل Gemini 1.5 Flash
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: {
@@ -71,11 +76,16 @@ export default async function handler(req, res) {
 
     const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || 'لم أتمكن من توليد رد.';
     
-    // إرسال الرد بكل المسميات الممكنة لتطابق كود تطبيقك تماماً
+    // الحل العبقري الثاني: إعادة تغليف رد Gemini ليطابق تماماً هيكلة OpenAI التي تنتظرها الواجهة
     return res.status(200).json({ 
-      reply: aiResponse,
-      response: aiResponse,
-      text: aiResponse
+      choices: [
+        { 
+          message: { 
+            role: "assistant",
+            content: aiResponse 
+          } 
+        }
+      ]
     });
 
   } catch (error) {
