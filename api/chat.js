@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // إعدادات الـ CORS لتسمح للواجهة بالاتصال بالسيرفر بدون مشاكل
+  // 1. إعدادات الـ CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -15,49 +15,84 @@ export default async function handler(req, res) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: 'API key is missing on the server' });
+      return res.status(500).json({ error: 'API key is missing' });
     }
 
-    const body = req.body;
-    
-    // 1. تحويل صيغة الرسائل القادمة من الواجهة إلى الصيغة التي يفهمها نموذج Gemini الجديد
+    const body = req.body || {};
     const incomingMessages = body.messages || [];
-    const formattedContents = incomingMessages.map(msg => {
-      return {
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content || '' }]
-      };
+    
+    // استخراج النص إذا لم تكن هناك مصفوفة
+    if (incomingMessages.length === 0) {
+       let altText = body.message || body.prompt || body.text || 'مرحبا';
+       incomingMessages.push({ role: 'user', content: altText });
+    }
+
+    let formattedContents = [];
+    let systemText = "";
+
+    // 2. أخذ آخر 5 رسائل فقط لتسريع الرد ومنع حدوث Timeout في Vercel (10 ثوانٍ)
+    const recentMessages = incomingMessages.slice(-5);
+
+    recentMessages.forEach(msg => {
+      // عزل رسائل الـ System لأن جوجل تمتلك مساراً مستقلاً لها عكس OpenAI
+      if (msg.role === 'system') {
+        systemText += msg.content + "\n";
+      } else {
+        const mappedRole = msg.role === 'assistant' ? 'model' : 'user';
+        
+        // دمج الرسائل المتتالية من نفس النوع (جوجل ترفض رسالتين user وراء بعضها)
+        const lastAdded = formattedContents[formattedContents.length - 1];
+        if (lastAdded && lastAdded.role === mappedRole) {
+            lastAdded.parts[0].text += "\n" + (msg.content || '');
+        } else {
+            formattedContents.push({
+                role: mappedRole,
+                parts: [{ text: msg.content || '' }]
+            });
+        }
+      }
     });
 
-    // 2. استخدام النموذج المستقر والأحدث حالياً gemini-3.5-flash لتجنب خطأ 404
-    const googleUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
+    // جوجل تشترط دائماً أن تكون أول رسالة في المحادثة من نوع user
+    if (formattedContents.length > 0 && formattedContents[0].role !== 'user') {
+        formattedContents.shift();
+    }
+
+    // 3. استخدام النموذج 1.5 Flash الأسرع على الإطلاق لضمان رد فوري قبل مهلة Vercel
+    const googleUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+
+    const requestBody = {
+      contents: formattedContents
+    };
+
+    if (systemText) {
+      requestBody.systemInstruction = {
+        parts: [{ text: systemText.trim() }]
+      };
+    }
 
     const response = await fetch(googleUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        contents: formattedContents
-      })
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error('Gemini API Error:', errorText);
       return res.status(response.status).json({ 
-        error: 'Error from Gemini API', 
+        error: 'API Error', 
         details: errorText,
         status: response.status 
       });
     }
 
     const data = await response.json();
-    
-    // 3. استخراج النص الراجع من رد الذكاء الاصطناعي
-    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'لم أتمكن من الحصول على رد.';
+    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'عذراً، لم أتمكن من توليد الرد.';
 
-    // 4. إرسال الرد بالصيغة المتوافقة تماماً مع الواجهة الأمامية الخاصة بك (OpenAI Format)
+    // 4. إعادة الرد بصيغة متوافقة 100% مع واجهة تطبيق الـ APK
     return res.status(200).json({
       choices: [
         {
@@ -70,7 +105,7 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Server Crash Error:', error);
+    console.error('Server Error:', error);
     return res.status(500).json({ error: 'Internal Server Error', details: error.message });
   }
 }
